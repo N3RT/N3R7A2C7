@@ -1,5 +1,8 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List
+
+import yaml
 
 from app.core.task_config import TaskConfig, load_task_config, TaskConfigError
 
@@ -18,8 +21,8 @@ class TaskRegistryError(Exception):
 
 class TaskRegistry:
     """
-    Простой файловый реестр задач поверх TaskConfig (config/tasks/*.yaml).
-    На данном этапе кэшируем только те задачи, к которым реально обращались.
+    Файловый реестр задач поверх TaskConfig (config/tasks/*.yaml).
+    Кэширует загруженные конфиги и умеет сканировать директорию задач.
     """
 
     def __init__(self) -> None:
@@ -35,13 +38,39 @@ class TaskRegistry:
         self._tasks[task_id] = cfg
         return cfg
 
+    def _scan_tasks_dir(self) -> List[str]:
+        """
+        Находит все config/tasks/*.yaml и возвращает список task_id.
+        """
+        tasks_dir = Path(__file__).parent.parent.parent / "config" / "tasks"
+        if not tasks_dir.is_dir():
+            return []
+
+        task_ids: List[str] = []
+        for path in tasks_dir.glob("*.yaml"):
+            try:
+                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            tid = data.get("task_id")
+            if isinstance(tid, str):
+                task_ids.append(tid)
+        return sorted(set(task_ids))
+
     def list_registered_tasks(self) -> List[RegisteredTask]:
         """
-        На данном этапе просто возвращаем список уже загруженных задач.
-        В будущем сюда добавится сканирование config/tasks/*.yaml.
+        Возвращает список задач по файловой системе (config/tasks/*.yaml),
+        загружая TaskConfig при необходимости.
         """
         result: List[RegisteredTask] = []
-        for cfg in self._tasks.values():
+
+        for task_id in self._scan_tasks_dir():
+            try:
+                cfg = self.get_task_config(task_id)
+            except TaskRegistryError:
+                continue
             result.append(
                 RegisteredTask(
                     task_id=cfg.task_id,

@@ -246,6 +246,26 @@
 4. Проверка demo_rules через CLI
 - Команда python -m app.cli.admin_cli task-info demo_rules выводит TaskConfig для demo_rules (task_id, name, description, task_type).
 
+
+[2026-02-05 15:09] REST-эндоинты списка задач и улучшенный TaskRegistry.
+
+1. TaskRegistry: сканирование файловых конфигов
+- Обновлён app/core/task_registry.py.
+- Реализован метод _scan_tasks_dir() для поиска config/tasks/*.yaml и извлечения task_id.
+- list_registered_tasks() теперь сканирует файловую систему, поднимает TaskConfig и возвращает RegisteredTask по всем найденным задачам (а не только ранее загруженным).
+
+2. REST-эндоинты задач
+- В app/api/v1/routes.py добавлены модели TaskInfo и два эндпоинта:
+  - GET /api/v1/tasks:
+    - возвращает список задач (task_id, task_type, name, description) на основе TaskRegistry.
+  - GET /api/v1/tasks/{task_id}:
+    - возвращает информацию по одной задаче через task_registry.get_task_config;
+    - при отсутствии конфига возвращает 404.
+
+3. Проверка API
+- GET /api/v1/tasks вернул две demo-задачи: demo_hello и demo_rules с корректными полями.
+- GET /api/v1/tasks/demo_rules вернул JSON с task_id=demo_rules, task_type=demo, корректными name и description.
+
 ## FILE: README.md
 # N3R7A2C7
 
@@ -291,7 +311,7 @@ N3R7A2C7/
 
 
 ## FILE: app/api/v1/routes.py
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -319,6 +339,48 @@ class TaskQueryResponse(BaseModel):
     ok: bool
     answer: Optional[str] = None
     error: Optional[str] = None
+
+
+class TaskInfo(BaseModel):
+    task_id: str
+    task_type: str
+    name: str
+    description: str
+
+
+@router.get("/tasks", response_model=List[TaskInfo])
+async def list_tasks() -> List[TaskInfo]:
+    """
+    Список всех задач из config/tasks/*.yaml.
+    """
+    tasks = task_registry.list_registered_tasks()
+    return [
+        TaskInfo(
+            task_id=t.task_id,
+            task_type=t.task_type,
+            name=t.name,
+            description=t.description,
+        )
+    for t in tasks
+    ]
+
+
+@router.get("/tasks/{task_id}", response_model=TaskInfo)
+async def get_task(task_id: str) -> TaskInfo:
+    """
+    Информация по одной задаче.
+    """
+    try:
+        cfg = task_registry.get_task_config(task_id)
+    except TaskRegistryError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return TaskInfo(
+        task_id=cfg.task_id,
+        task_type=cfg.task_type,
+        name=cfg.name,
+        description=cfg.description,
+    )
 
 
 @router.post("/task/query", response_model=TaskQueryResponse)
@@ -753,7 +815,10 @@ def load_task_config(task_id: str) -> TaskConfig:
 
 ## FILE: app/core/task_registry.py
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List
+
+import yaml
 
 from app.core.task_config import TaskConfig, load_task_config, TaskConfigError
 
@@ -772,8 +837,8 @@ class TaskRegistryError(Exception):
 
 class TaskRegistry:
     """
-    Простой файловый реестр задач поверх TaskConfig (config/tasks/*.yaml).
-    На данном этапе кэшируем только те задачи, к которым реально обращались.
+    Файловый реестр задач поверх TaskConfig (config/tasks/*.yaml).
+    Кэширует загруженные конфиги и умеет сканировать директорию задач.
     """
 
     def __init__(self) -> None:
@@ -789,13 +854,39 @@ class TaskRegistry:
         self._tasks[task_id] = cfg
         return cfg
 
+    def _scan_tasks_dir(self) -> List[str]:
+        """
+        Находит все config/tasks/*.yaml и возвращает список task_id.
+        """
+        tasks_dir = Path(__file__).parent.parent.parent / "config" / "tasks"
+        if not tasks_dir.is_dir():
+            return []
+
+        task_ids: List[str] = []
+        for path in tasks_dir.glob("*.yaml"):
+            try:
+                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            tid = data.get("task_id")
+            if isinstance(tid, str):
+                task_ids.append(tid)
+        return sorted(set(task_ids))
+
     def list_registered_tasks(self) -> List[RegisteredTask]:
         """
-        На данном этапе просто возвращаем список уже загруженных задач.
-        В будущем сюда добавится сканирование config/tasks/*.yaml.
+        Возвращает список задач по файловой системе (config/tasks/*.yaml),
+        загружая TaskConfig при необходимости.
         """
         result: List[RegisteredTask] = []
-        for cfg in self._tasks.values():
+
+        for task_id in self._scan_tasks_dir():
+            try:
+                cfg = self.get_task_config(task_id)
+            except TaskRegistryError:
+                continue
             result.append(
                 RegisteredTask(
                     task_id=cfg.task_id,

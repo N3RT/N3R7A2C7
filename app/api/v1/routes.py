@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -26,6 +26,48 @@ class TaskQueryResponse(BaseModel):
     ok: bool
     answer: Optional[str] = None
     error: Optional[str] = None
+
+
+class TaskInfo(BaseModel):
+    task_id: str
+    task_type: str
+    name: str
+    description: str
+
+
+@router.get("/tasks", response_model=List[TaskInfo])
+async def list_tasks() -> List[TaskInfo]:
+    """
+    Список всех задач из config/tasks/*.yaml.
+    """
+    tasks = task_registry.list_registered_tasks()
+    return [
+        TaskInfo(
+            task_id=t.task_id,
+            task_type=t.task_type,
+            name=t.name,
+            description=t.description,
+        )
+    for t in tasks
+    ]
+
+
+@router.get("/tasks/{task_id}", response_model=TaskInfo)
+async def get_task(task_id: str) -> TaskInfo:
+    """
+    Информация по одной задаче.
+    """
+    try:
+        cfg = task_registry.get_task_config(task_id)
+    except TaskRegistryError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return TaskInfo(
+        task_id=cfg.task_id,
+        task_type=cfg.task_type,
+        name=cfg.name,
+        description=cfg.description,
+    )
 
 
 @router.post("/task/query", response_model=TaskQueryResponse)
