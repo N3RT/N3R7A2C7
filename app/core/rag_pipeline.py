@@ -12,43 +12,63 @@ class RetrievedChunk:
     score: float
 
 
-def ensure_demo_hello_collection():
+def ensure_collection_for_task(task_cfg: TaskConfig):
     """
-    Для demo_hello делаем ленивую инициализацию коллекции с одним демо-документом.
-    В реальном проекте сюда приедет полноценный ingestion.
+    Ленивое создание коллекции и демо-документов для поддержки нескольких demo-задач.
     """
     client = get_chroma_client()
-    coll = client.get_or_create_collection(name="demo_hello_texts")
 
-    # Проверяем, не пустая ли коллекция.
-    existing = coll.count()
-    if existing > 0:
+    if task_cfg.task_id == "demo_hello":
+        coll = client.get_or_create_collection(name="demo_hello_texts")
+        if coll.count() > 0:
+            return coll
+
+        demo_doc = (
+            "Это демо-документ системы заявок. "
+            "Система помогает сотрудникам задавать вопросы по регламентам и процессам, "
+            "а также получать подсказки по доступам и ИТ-сервисам. "
+            "В будущем сюда будут загружены настоящие корпоративные документы и инструкции."
+        )
+
+        coll.add(
+            ids=["demo_hello_doc_1"],
+            documents=[demo_doc],
+            metadatas=[{"source_id": "demo_hello_doc_1", "kind": "demo"}],
+        )
         return coll
 
-    demo_doc = (
-        "Это демо-документ системы заявок. "
-        "Система помогает сотрудникам задавать вопросы по регламентам и процессам, "
-        "а также получать подсказки по доступам и ИТ-сервисам. "
-        "В будущем сюда будут загружены настоящие корпоративные документы и инструкции."
-    )
+    if task_cfg.task_id == "demo_rules":
+        coll = client.get_or_create_collection(name="demo_rules_texts")
+        if coll.count() > 0:
+            return coll
 
-    coll.add(
-        ids=["demo_doc_1"],
-        documents=[demo_doc],
-        metadatas=[{"source_id": "demo_doc_1", "kind": "demo"}],
-    )
-    return coll
+        demo_doc = (
+            "В компании действуют базовые регламенты: "
+            "сотрудник обязан согласовывать доступы к системам через заявки, "
+            "соблюдать правила информационной безопасности и использовать "
+            "только утверждённые каналы коммуникации. "
+            "Все нестандартные ситуации должны обсуждаться с руководителем или службой поддержки."
+        )
+
+        coll.add(
+            ids=["demo_rules_doc_1"],
+            documents=[demo_doc],
+            metadatas=[{"source_id": "demo_rules_doc_1", "kind": "demo"}],
+        )
+        return coll
+
+    # Для остальных задач пока не поддерживаем коллекции
+    return None
 
 
 def retrieve_text_chunks(task_cfg: TaskConfig, query: str, top_k: int = 3) -> List[RetrievedChunk]:
     """
-    Минимальный поиск по текстам для demo_hello.
+    Минимальный поиск по текстам для demo-задач.
     """
-    if task_cfg.task_id != "demo_hello":
-        # Пока поддерживаем только одну демо-задачу.
+    coll = ensure_collection_for_task(task_cfg)
+    if coll is None:
         return []
 
-    coll = ensure_demo_hello_collection()
     res = coll.query(query_texts=[query], n_results=top_k)
 
     docs = res.get("documents", [[]])[0]

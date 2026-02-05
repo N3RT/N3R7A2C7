@@ -220,6 +220,32 @@
 - Выполнена команда: python -m app.cli.admin_cli task-info demo_hello → выводит данные TaskConfig для demo_hello.
 - Выполнена команда: python -m app.cli.admin_cli tasks-loaded → пока сообщает, что задач в реестре нет (список будет наполняться по мере обращений к API и CLI).
 
+
+[2026-02-05 15:05] Вторая demo-задача demo_rules и многозадачный RAG.
+
+1. Новый TaskConfig demo_rules
+- Добавлен файл config/tasks/demo_rules.yaml.
+- Описана demo-задача "Demo: регламенты и правила" с типом task_type=demo.
+- technical_prompt ориентирован на объяснение внутренних правил и регламентов простым языком.
+
+2. Расширение RAG-пайплайна
+- Обновлён app/core/rag_pipeline.py:
+  - реализована ensure_collection_for_task(task_cfg) с поддержкой:
+    - demo_hello → коллекция demo_hello_texts;
+    - demo_rules → коллекция demo_rules_texts.
+  - для demo_rules добавлен демо-документ с описанием базовых регламентов: заявки на доступы, информационная безопасность, утверждённые каналы коммуникации.
+- Функция retrieve_text_chunks(...) теперь работает с любой поддерживаемой demo-задачей через ensure_collection_for_task.
+- build_llm_prompt(...) без изменений, но используется уже со вторым типом контекста.
+
+3. Проверка demo_rules через API
+- Выполнен запрос:
+  - task_id=demo_rules, task_type=demo;
+  - вопрос про базовые правила по заявкам и безопасности.
+- Ответ локальной LLM содержит отсылку к заявкам, доступам к системам и правилам информационной безопасности, что подтверждает использование нового контекста из demo_rules_texts.
+
+4. Проверка demo_rules через CLI
+- Команда python -m app.cli.admin_cli task-info demo_rules выводит TaskConfig для demo_rules (task_id, name, description, task_type).
+
 ## FILE: README.md
 # N3R7A2C7
 
@@ -562,43 +588,63 @@ class RetrievedChunk:
     score: float
 
 
-def ensure_demo_hello_collection():
+def ensure_collection_for_task(task_cfg: TaskConfig):
     """
-    Для demo_hello делаем ленивую инициализацию коллекции с одним демо-документом.
-    В реальном проекте сюда приедет полноценный ingestion.
+    Ленивое создание коллекции и демо-документов для поддержки нескольких demo-задач.
     """
     client = get_chroma_client()
-    coll = client.get_or_create_collection(name="demo_hello_texts")
 
-    # Проверяем, не пустая ли коллекция.
-    existing = coll.count()
-    if existing > 0:
+    if task_cfg.task_id == "demo_hello":
+        coll = client.get_or_create_collection(name="demo_hello_texts")
+        if coll.count() > 0:
+            return coll
+
+        demo_doc = (
+            "Это демо-документ системы заявок. "
+            "Система помогает сотрудникам задавать вопросы по регламентам и процессам, "
+            "а также получать подсказки по доступам и ИТ-сервисам. "
+            "В будущем сюда будут загружены настоящие корпоративные документы и инструкции."
+        )
+
+        coll.add(
+            ids=["demo_hello_doc_1"],
+            documents=[demo_doc],
+            metadatas=[{"source_id": "demo_hello_doc_1", "kind": "demo"}],
+        )
         return coll
 
-    demo_doc = (
-        "Это демо-документ системы заявок. "
-        "Система помогает сотрудникам задавать вопросы по регламентам и процессам, "
-        "а также получать подсказки по доступам и ИТ-сервисам. "
-        "В будущем сюда будут загружены настоящие корпоративные документы и инструкции."
-    )
+    if task_cfg.task_id == "demo_rules":
+        coll = client.get_or_create_collection(name="demo_rules_texts")
+        if coll.count() > 0:
+            return coll
 
-    coll.add(
-        ids=["demo_doc_1"],
-        documents=[demo_doc],
-        metadatas=[{"source_id": "demo_doc_1", "kind": "demo"}],
-    )
-    return coll
+        demo_doc = (
+            "В компании действуют базовые регламенты: "
+            "сотрудник обязан согласовывать доступы к системам через заявки, "
+            "соблюдать правила информационной безопасности и использовать "
+            "только утверждённые каналы коммуникации. "
+            "Все нестандартные ситуации должны обсуждаться с руководителем или службой поддержки."
+        )
+
+        coll.add(
+            ids=["demo_rules_doc_1"],
+            documents=[demo_doc],
+            metadatas=[{"source_id": "demo_rules_doc_1", "kind": "demo"}],
+        )
+        return coll
+
+    # Для остальных задач пока не поддерживаем коллекции
+    return None
 
 
 def retrieve_text_chunks(task_cfg: TaskConfig, query: str, top_k: int = 3) -> List[RetrievedChunk]:
     """
-    Минимальный поиск по текстам для demo_hello.
+    Минимальный поиск по текстам для demo-задач.
     """
-    if task_cfg.task_id != "demo_hello":
-        # Пока поддерживаем только одну демо-задачу.
+    coll = ensure_collection_for_task(task_cfg)
+    if coll is None:
         return []
 
-    coll = ensure_demo_hello_collection()
     res = coll.query(query_texts=[query], n_results=top_k)
 
     docs = res.get("documents", [[]])[0]
@@ -904,6 +950,19 @@ technical_prompt: |
   Сейчас у нас демо-режим: документов и таблиц нет, просто объясни,
   что это за демо-система заявок и что она в перспективе будет уметь
   на уровне бизнеса (без технических деталей).
+
+## FILE: config/tasks/demo_rules.yaml
+task_id: demo_rules
+name: "Demo: регламенты и правила"
+description: "Демо-задача для вопросов про внутренние правила и регламенты компании."
+task_type: demo
+
+technical_prompt: |
+  Ты ассистент RAG-системы, которая помогает сотрудникам разбираться
+  во внутренних правилах, регламентах и процессах компании.
+  Отвечай простым человеческим языком, без юридического перегруза.
+  Если информации в контексте не хватает, честно скажи об этом и предложи,
+  к кому можно обратиться или как переформулировать вопрос.
 
 ## FILE: docker/docker-compose.dev.yml
 
