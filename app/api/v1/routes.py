@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config_loader import get_environment
 from app.core.task_config import load_task_config, TaskConfigError
+from app.core.rag_pipeline import retrieve_text_chunks, build_llm_prompt
 from llm_connectors.connector_dev import call_llm, LLMError
 
 
@@ -33,7 +34,7 @@ async def task_query(request: TaskQueryRequest) -> TaskQueryResponse:
     Эндпоинт по ТЗ:
     - грузит TaskConfig по task_id;
     - проверяет согласованность task_type и environment;
-    - для demo-задач в dev/test вызывает LLM с тех.промптом из TaskConfig;
+    - для demo-задач выполняет минимальный RAG по текстам (через ChromaDB) и отправляет контекст в LLM;
     - для corporate в dev/test блокирует.
     """
     env = get_environment()
@@ -56,9 +57,9 @@ async def task_query(request: TaskQueryRequest) -> TaskQueryResponse:
         )
 
     if task_cfg.task_type == "demo":
-        system_prompt = task_cfg.technical_prompt or (
-            "Ты помощник демо-RAG системы. Отвечай кратко и по делу."
-        )
+        chunks = retrieve_text_chunks(task_cfg, request.query, top_k=3)
+        system_prompt = build_llm_prompt(task_cfg, request.query, chunks)
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": request.query},
