@@ -3,8 +3,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.core.config_loader import get_environment
-from app.core.task_config import load_task_config, TaskConfigError
+from app.core.task_registry import task_registry, TaskRegistryError
+from app.core.access_control import check_task_access
 from app.core.rag_pipeline import retrieve_text_chunks, build_llm_prompt
 from llm_connectors.connector_dev import call_llm, LLMError
 
@@ -32,16 +32,15 @@ class TaskQueryResponse(BaseModel):
 async def task_query(request: TaskQueryRequest) -> TaskQueryResponse:
     """
     Эндпоинт по ТЗ:
-    - грузит TaskConfig по task_id;
-    - проверяет согласованность task_type и environment;
-    - для demo-задач выполняет минимальный RAG по текстам (через ChromaDB) и отправляет контекст в LLM;
-    - для corporate в dev/test блокирует.
+    - получает TaskConfig через TaskRegistry;
+    - проверяет согласованность task_type;
+    - делегирует решение по доступу модулю AccessControl;
+    - для demo-задач делает минимальный RAG по текстам и вызывает LLM;
+    - corporate-задачи в dev/test блокируются.
     """
-    env = get_environment()
-
     try:
-        task_cfg = load_task_config(request.task_id)
-    except TaskConfigError as e:
+        task_cfg = task_registry.get_task_config(request.task_id)
+    except TaskRegistryError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
     if task_cfg.task_type != request.task_type:
@@ -50,11 +49,9 @@ async def task_query(request: TaskQueryRequest) -> TaskQueryResponse:
             detail=f"Request task_type={request.task_type} does not match TaskConfig.task_type={task_cfg.task_type}",
         )
 
-    if task_cfg.task_type == "corporate" and env != "prod":
-        raise HTTPException(
-            status_code=403,
-            detail="Корпоративные задачи разрешены только в режиме prod",
-        )
+    decision = check_task_access(task_cfg)
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=decision.reason)
 
     if task_cfg.task_type == "demo":
         chunks = retrieve_text_chunks(task_cfg, request.query, top_k=3)

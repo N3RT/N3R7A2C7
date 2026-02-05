@@ -182,6 +182,28 @@
   - вызывает локальную LLM через call_llm с подмешанным контекстом.
 - Проверка через curl с task_id=demo_hello показала, что ответы модели ссылаются на идею внутренних документов и системы заявок, то есть контекст из ChromaDB реально влияет на ответ.
 
+[2026-02-05 14:44] TaskRegistry и AccessControl для задач.
+
+1. Реестр задач
+- Добавлен модуль app/core/task_registry.py.
+- Реализован TaskRegistry с кешированием TaskConfig по task_id и простым списком RegisteredTask.
+- Введён глобальный singleton task_registry для доступа из API и других модулей.
+
+2. Access control по ТЗ
+- Добавлен модуль app/core/access_control.py.
+- Функция check_task_access(TaskConfig) реализует правила:
+  - task_type=demo разрешён в любых режимах (dev/test/prod);
+  - task_type=corporate разрешён только в prod, в dev/test возвращает отказ.
+- Возвращаемая структура AccessDecision инкапсулирует флаг allowed и reason.
+
+3. Обновление /api/v1/task/query
+- Эндпоинт /api/v1/task/query переключён на использование task_registry вместо прямого вызова load_task_config.
+- После загрузки TaskConfig дополнительно проверяется согласованность request.task_type и TaskConfig.task_type.
+- Решение о доступе делегировано модулю AccessControl; при отказе клиент получает 403 и текстовое reason.
+- При успешном доступе demo-задачи pipeline остаётся прежним: retrieve_text_chunks + build_llm_prompt + вызов локальной LLM.
+
+4. Проверка после изменений
+- Запрос через curl к demo_hello подтвердил, что demo-задача продолжает работать и возвращает осмысленный ответ после внедрения реестра задач и access control.
 
 ## FILE: README.md
 # N3R7A2C7
@@ -233,8 +255,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.core.config_loader import get_environment
-from app.core.task_config import load_task_config, TaskConfigError
+from app.core.task_registry import task_registry, TaskRegistryError
+from app.core.access_control import check_task_access
 from app.core.rag_pipeline import retrieve_text_chunks, build_llm_prompt
 from llm_connectors.connector_dev import call_llm, LLMError
 
@@ -262,16 +284,15 @@ class TaskQueryResponse(BaseModel):
 async def task_query(request: TaskQueryRequest) -> TaskQueryResponse:
     """
     Эндпоинт по ТЗ:
-    - грузит TaskConfig по task_id;
-    - проверяет согласованность task_type и environment;
-    - для demo-задач выполняет минимальный RAG по текстам (через ChromaDB) и отправляет контекст в LLM;
-    - для corporate в dev/test блокирует.
+    - получает TaskConfig через TaskRegistry;
+    - проверяет согласованность task_type;
+    - делегирует решение по доступу модулю AccessControl;
+    - для demo-задач делает минимальный RAG по текстам и вызывает LLM;
+    - corporate-задачи в dev/test блокируются.
     """
-    env = get_environment()
-
     try:
-        task_cfg = load_task_config(request.task_id)
-    except TaskConfigError as e:
+        task_cfg = task_registry.get_task_config(request.task_id)
+    except TaskRegistryError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
     if task_cfg.task_type != request.task_type:
@@ -280,11 +301,9 @@ async def task_query(request: TaskQueryRequest) -> TaskQueryResponse:
             detail=f"Request task_type={request.task_type} does not match TaskConfig.task_type={task_cfg.task_type}",
         )
 
-    if task_cfg.task_type == "corporate" and env != "prod":
-        raise HTTPException(
-            status_code=403,
-            detail="Корпоративные задачи разрешены только в режиме prod",
-        )
+    decision = check_task_access(task_cfg)
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=decision.reason)
 
     if task_cfg.task_type == "demo":
         chunks = retrieve_text_chunks(task_cfg, request.query, top_k=3)
@@ -305,6 +324,49 @@ async def task_query(request: TaskQueryRequest) -> TaskQueryResponse:
 
 ## FILE: app/core/__init__.py
 
+
+## FILE: app/core/access_control.py
+from dataclasses import dataclass
+
+from app.core.config_loader import get_environment
+from app.core.task_config import TaskConfig
+
+
+@dataclass
+class AccessDecision:
+    allowed: bool
+    reason: str
+
+
+def check_task_access(task_cfg: TaskConfig) -> AccessDecision:
+    """
+    Реализация правил из ТЗ:
+    - demo: можно в prod/dev/test;
+    - corporate: только в prod, в dev/test — блок.
+    """
+    env = get_environment()
+
+    if task_cfg.task_type == "demo":
+        return AccessDecision(
+            allowed=True,
+            reason=f"demo task in environment={env} is allowed",
+        )
+
+    if task_cfg.task_type == "corporate":
+        if env == "prod":
+            return AccessDecision(
+                allowed=True,
+                reason="corporate task in prod is allowed",
+            )
+        return AccessDecision(
+            allowed=False,
+            reason="corporate tasks are allowed only in prod",
+        )
+
+    return AccessDecision(
+        allowed=False,
+        reason=f"Unknown task_type={task_cfg.task_type}",
+    )
 
 ## FILE: app/core/chroma_client.py
 from pathlib import Path
@@ -554,6 +616,65 @@ def load_task_config(task_id: str) -> TaskConfig:
         raise TaskConfigError("TaskConfig YAML must be a mapping at top level")
 
     return TaskConfig.from_dict(data)
+
+## FILE: app/core/task_registry.py
+from dataclasses import dataclass
+from typing import Dict, List
+
+from app.core.task_config import TaskConfig, load_task_config, TaskConfigError
+
+
+@dataclass
+class RegisteredTask:
+    task_id: str
+    task_type: str  # "demo" | "corporate"
+    name: str
+    description: str
+
+
+class TaskRegistryError(Exception):
+    pass
+
+
+class TaskRegistry:
+    """
+    Простой файловый реестр задач поверх TaskConfig (config/tasks/*.yaml).
+    На данном этапе кэшируем только те задачи, к которым реально обращались.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: Dict[str, TaskConfig] = {}
+
+    def get_task_config(self, task_id: str) -> TaskConfig:
+        if task_id in self._tasks:
+            return self._tasks[task_id]
+        try:
+            cfg = load_task_config(task_id)
+        except TaskConfigError as e:
+            raise TaskRegistryError(str(e)) from e
+        self._tasks[task_id] = cfg
+        return cfg
+
+    def list_registered_tasks(self) -> List[RegisteredTask]:
+        """
+        На данном этапе просто возвращаем список уже загруженных задач.
+        В будущем сюда добавится сканирование config/tasks/*.yaml.
+        """
+        result: List[RegisteredTask] = []
+        for cfg in self._tasks.values():
+            result.append(
+                RegisteredTask(
+                    task_id=cfg.task_id,
+                    task_type=cfg.task_type,
+                    name=cfg.name,
+                    description=cfg.description,
+                )
+            )
+        return result
+
+
+# Глобальный singleton, чтобы не плодить реестры
+task_registry = TaskRegistry()
 
 ## FILE: app/main.py
 from fastapi import FastAPI
