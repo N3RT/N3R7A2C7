@@ -109,6 +109,53 @@
   - реализовать config_loader и модель TaskConfig по ТЗ,
   - добавить эндпоинт /api/v1/task/query, который будет использовать технический промпт задачи и локальную LLM через коннектор.
 
+
+[2026-02-05 13:02] Демо-эндпоинт /api/v1/task/query и конфиг-лоадер.
+
+1. Конфиг-лоадер
+- Добавлен модуль app/core/config_loader.py на базе pathlib + yaml.safe_load.
+- Реализован кэшируемый load_system_config и хелперы get_environment, get_llm_mode, get_llm_connector_path.
+- Конфиг читается из config/system.yaml, валидация environment (dev/test/prod).
+
+2. API /api/v1/task/query
+- Добавлен роутер app/api/v1/routes.py с APIRouter(prefix="/api/v1").
+- Описаны модели TaskQueryRequest/TaskQueryResponse на Pydantic v2 (pattern для task_type).
+- Реализован POST /api/v1/task/query:
+  - блокирует корпоративные задачи (task_type=corporate) при environment != prod;
+  - для demo-задач в dev вызывает локальную LLM через call_llm с простым системным промптом;
+  - возвращает JSON {ok, answer|error}.
+
+3. Интеграция с FastAPI
+- В app/main.py подключен роутер api_v1_router.
+- Эндпоинт /api/v1/health использует get_environment и get_llm_mode из конфиг-лоадера.
+- Проверены ручки через curl:
+  - /api/v1/health возвращает статус ok и environment=dev;
+  - /api/v1/task/query с demo-задачей отдает ответ локальной модели;
+  - /api/v1/task/query с corporate-задачей в dev возвращает 403 "Корпоративные задачи разрешены только в режиме prod".
+
+
+[2026-02-05 13:05] TaskConfig и файловые конфиги задач.
+
+1. Модель TaskConfig
+- Добавлен модуль app/core/task_config.py.
+- Реализована dataclass-модель TaskConfig с полями task_id, name, description, task_type, technical_prompt.
+- Добавлен load_task_config(task_id), который читает config/tasks/<task_id>.yaml и валидирует task_type (demo/corporate).
+
+2. Конфиг задачи demo_hello
+- Создан каталог config/tasks.
+- Добавлен файл config/tasks/demo_hello.yaml с минимальным TaskConfig:
+  - task_id=demo_hello, task_type=demo;
+  - человекочитаемые name/description;
+  - technical_prompt с бизнес-описанием демо-системы заявок.
+
+3. Обновление /api/v1/task/query
+- Эндпоинт /api/v1/task/query переключён на использование TaskConfig:
+  - грузит конфиг по task_id через load_task_config;
+  - проверяет совпадение request.task_type и TaskConfig.task_type;
+  - блокирует corporate-задачи при environment != prod;
+  - для demo-задач в dev вызывает локальную LLM с техническим промптом из TaskConfig.
+- Проверка через curl с task_id=demo_hello вернула осмысленный бизнес-ответ о демо-системе заявок.
+
 ## FILE: README.md
 # N3R7A2C7
 
@@ -154,35 +201,230 @@ N3R7A2C7/
 
 
 ## FILE: app/api/v1/routes.py
+from typing import Optional
 
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from app.core.config_loader import get_environment
+from app.core.task_config import load_task_config, TaskConfigError
+from llm_connectors.connector_dev import call_llm, LLMError
+
+
+router = APIRouter(prefix="/api/v1", tags=["tasks"])
+
+
+class TaskQueryRequest(BaseModel):
+    task_id: str = Field(..., description="Идентификатор задачи, например demo_hello")
+    task_type: str = Field(
+        "demo",
+        description="Тип задачи: demo или corporate (для валидации, должен совпадать с TaskConfig)",
+        pattern="^(demo|corporate)$",
+    )
+    query: str = Field(..., description="Текст пользовательского запроса")
+
+
+class TaskQueryResponse(BaseModel):
+    ok: bool
+    answer: Optional[str] = None
+    error: Optional[str] = None
+
+
+@router.post("/task/query", response_model=TaskQueryResponse)
+async def task_query(request: TaskQueryRequest) -> TaskQueryResponse:
+    """
+    Эндпоинт по ТЗ:
+    - грузит TaskConfig по task_id;
+    - проверяет согласованность task_type и environment;
+    - для demo-задач в dev/test вызывает LLM с тех.промптом из TaskConfig;
+    - для corporate в dev/test блокирует.
+    """
+    env = get_environment()
+
+    try:
+        task_cfg = load_task_config(request.task_id)
+    except TaskConfigError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    if task_cfg.task_type != request.task_type:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Request task_type={request.task_type} does not match TaskConfig.task_type={task_cfg.task_type}",
+        )
+
+    if task_cfg.task_type == "corporate" and env != "prod":
+        raise HTTPException(
+            status_code=403,
+            detail="Корпоративные задачи разрешены только в режиме prod",
+        )
+
+    if task_cfg.task_type == "demo":
+        system_prompt = task_cfg.technical_prompt or (
+            "Ты помощник демо-RAG системы. Отвечай кратко и по делу."
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": request.query},
+        ]
+        try:
+            resp = await call_llm(messages, model="llama3.2:1b")
+            answer = resp["choices"][0]["message"]["content"]
+            return TaskQueryResponse(ok=True, answer=answer)
+        except LLMError as e:
+            return TaskQueryResponse(ok=False, error=str(e))
+
+    raise HTTPException(status_code=400, detail="Unsupported task_type")
 
 ## FILE: app/core/__init__.py
 
 
 ## FILE: app/core/config_loader.py
+from pathlib import Path
+from functools import lru_cache
+from typing import Any, Dict
 
+import yaml
+
+
+class SystemConfigError(Exception):
+    pass
+
+
+@lru_cache(maxsize=1)
+def load_system_config() -> Dict[str, Any]:
+    """
+    Загружает config/system.yaml один раз за жизнь процесса.
+    """
+    config_path = Path(__file__).parent.parent.parent / "config" / "system.yaml"
+    if not config_path.is_file():
+        raise SystemConfigError(f"Config file not found: {config_path}")
+
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise SystemConfigError(f"Failed to read system config: {e}") from e
+
+    if not isinstance(data, dict):
+        raise SystemConfigError("System config must be a mapping at top level")
+
+    return data
+
+
+def get_environment() -> str:
+    cfg = load_system_config()
+    env = cfg.get("environment", "dev")
+    if env not in {"dev", "test", "prod"}:
+        raise SystemConfigError(f"Invalid environment in config: {env}")
+    return env
+
+
+def get_llm_mode() -> str:
+    cfg = load_system_config()
+    llm = cfg.get("llm", {}) or {}
+    mode = llm.get("mode", "dev")
+    return mode
+
+
+def get_llm_connector_path() -> str:
+    cfg = load_system_config()
+    llm = cfg.get("llm", {}) or {}
+    connector = llm.get("connector")
+    if not connector:
+        raise SystemConfigError("llm.connector is not set in system config")
+    return connector
 
 ## FILE: app/core/llm_client.py
 
+
+## FILE: app/core/task_config.py
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict
+
+import yaml
+
+
+class TaskConfigError(Exception):
+    pass
+
+
+@dataclass
+class TaskConfig:
+    task_id: str
+    name: str
+    description: str
+    task_type: str  # "demo" | "corporate"
+    technical_prompt: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TaskConfig":
+        try:
+            task_id = data["task_id"]
+            name = data.get("name", task_id)
+            description = data.get("description", "")
+            task_type = data.get("task_type", "demo")
+            technical_prompt = data.get("technical_prompt", "")
+        except KeyError as e:
+            raise TaskConfigError(f"Missing required field in TaskConfig: {e}") from e
+
+        if task_type not in {"demo", "corporate"}:
+            raise TaskConfigError(f"Invalid task_type in TaskConfig: {task_type}")
+
+        return cls(
+            task_id=task_id,
+            name=name,
+            description=description,
+            task_type=task_type,
+            technical_prompt=technical_prompt,
+        )
+
+
+def load_task_config(task_id: str) -> TaskConfig:
+    """
+    Загружает config/tasks/<task_id>.yaml и парсит в TaskConfig.
+    Сейчас используем сильно упрощённое подмножество полей из ТЗ.
+    """
+    tasks_dir = Path(__file__).parent.parent.parent / "config" / "tasks"
+    cfg_path = tasks_dir / f"{task_id}.yaml"
+
+    if not cfg_path.is_file():
+        raise TaskConfigError(f"Task config not found for task_id={task_id}: {cfg_path}")
+
+    try:
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise TaskConfigError(f"Failed to read TaskConfig YAML: {e}") from e
+
+    if not isinstance(data, dict):
+        raise TaskConfigError("TaskConfig YAML must be a mapping at top level")
+
+    return TaskConfig.from_dict(data)
 
 ## FILE: app/main.py
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from llm_connectors.connector_dev import call_llm, LLMError
+from app.api.v1.routes import router as api_v1_router
+from app.core.config_loader import get_environment, get_llm_mode
+
 
 app = FastAPI(title="RAG Service", version="0.1.0")
+
+app.include_router(api_v1_router)
 
 
 @app.get("/api/v1/health")
 async def health():
+    env = get_environment()
+    llm_mode = get_llm_mode()
     return JSONResponse(
         {
             "status": "ok",
-            "environment": "dev",
+            "environment": env,
             "chromadb": "unknown",
             "sqlite": "unknown",
-            "llm_mode": "ollama_chat_4b",
+            "llm_mode": llm_mode or "unknown",
             "uptime_seconds": 0,
         }
     )
@@ -285,6 +527,19 @@ paths:
 llm:
   mode: dev        # dev -> OpenRouter, prod/test заполним позже
   connector: "llm_connectors.connector_dev:call_llm"
+
+## FILE: config/tasks/demo_hello.yaml
+task_id: demo_hello
+name: "Demo: приветственная задача"
+description: "Простая демо-задача для проверки RAG-сервиса и интеграции с LLM."
+task_type: demo
+
+technical_prompt: |
+  Ты ассистент системы RAG, которая обрабатывает заявки сотрудников.
+  Отвечай кратко, дружелюбно и по делу.
+  Сейчас у нас демо-режим: документов и таблиц нет, просто объясни,
+  что это за демо-система заявок и что она в перспективе будет уметь
+  на уровне бизнеса (без технических деталей).
 
 ## FILE: docker/docker-compose.dev.yml
 

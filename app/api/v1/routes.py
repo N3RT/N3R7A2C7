@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.core.config_loader import get_environment
+from app.core.task_config import load_task_config, TaskConfigError
 from llm_connectors.connector_dev import call_llm, LLMError
 
 
@@ -14,7 +15,7 @@ class TaskQueryRequest(BaseModel):
     task_id: str = Field(..., description="Идентификатор задачи, например demo_hello")
     task_type: str = Field(
         "demo",
-        description="Тип задачи: demo или corporate",
+        description="Тип задачи: demo или corporate (для валидации, должен совпадать с TaskConfig)",
         pattern="^(demo|corporate)$",
     )
     query: str = Field(..., description="Текст пользовательского запроса")
@@ -29,23 +30,34 @@ class TaskQueryResponse(BaseModel):
 @router.post("/task/query", response_model=TaskQueryResponse)
 async def task_query(request: TaskQueryRequest) -> TaskQueryResponse:
     """
-    Минимальный демо-эндпоинт по ТЗ:
-    - проверяет режим/тип задачи;
-    - для demo-задач в dev/test прокидывает запрос в LLM с простым тех.промптом;
+    Эндпоинт по ТЗ:
+    - грузит TaskConfig по task_id;
+    - проверяет согласованность task_type и environment;
+    - для demo-задач в dev/test вызывает LLM с тех.промптом из TaskConfig;
     - для corporate в dev/test блокирует.
     """
     env = get_environment()
 
-    if request.task_type == "corporate" and env != "prod":
+    try:
+        task_cfg = load_task_config(request.task_id)
+    except TaskConfigError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    if task_cfg.task_type != request.task_type:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Request task_type={request.task_type} does not match TaskConfig.task_type={task_cfg.task_type}",
+        )
+
+    if task_cfg.task_type == "corporate" and env != "prod":
         raise HTTPException(
             status_code=403,
             detail="Корпоративные задачи разрешены только в режиме prod",
         )
 
-    if request.task_type == "demo":
-        system_prompt = (
-            "Ты помощник демо-RAG системы. Отвечай кратко и по делу, "
-            "без выдуманных фактов. Если не хватает информации, честно скажи об этом."
+    if task_cfg.task_type == "demo":
+        system_prompt = task_cfg.technical_prompt or (
+            "Ты помощник демо-RAG системы. Отвечай кратко и по делу."
         )
         messages = [
             {"role": "system", "content": system_prompt},
