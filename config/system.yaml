@@ -1,0 +1,11 @@
+environment: dev  # dev | test | prod
+
+paths:
+  data_root: "./data"
+  chromadb_dir: "./data/chromadb"
+  sqlite_path: "./data/sqlite/tables.db"
+  logs_path: "./data/logs/app.log"
+
+llm:
+  mode: dev        # dev -> OpenRouter, prod/test заполним позже
+  connector: "llm_connectors.connector_dev:call_llm"

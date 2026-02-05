@@ -1,0 +1,339 @@
+# SNAPSHOT OF PROJECT FILES (TEXT)
+# Each file is separated by a marker line: ## FILE: <relative_path>
+
+## FILE: DEV_LOG.txt
+[2026-02-05 11:59] Инициализация каркаса проекта rag_advct и интеграция с локальной LLM через ollama_chat_4b.
+
+1. Структура проекта
+- Создан базовый каркас каталога rag_advct по ТЗ RAG-системы:
+  - app/ (исходники сервиса)
+  - app/api/, app/core/, app/ingestion/, app/postprocessing/, app/bot/, app/cli/
+  - config/ (system.yaml + заготовка для tasks/)
+  - data/ (data/.gitkeep, подготовка под chromadb/sqlite/logs)
+  - docker/ (Dockerfile, docker-compose.dev.yml – пока пустые заглушки)
+  - llm_connectors/ (модули для подключения к LLM)
+  - tests/ (test_api.py – заготовка)
+- В .gitignore добавлены:
+  - .env
+  - каталог data/ (кроме data/.gitkeep)
+  - *.log, временные *.md.tmp, *.docx
+  - all_code.py, DEV_LOG.txt, PROJECT_PLAN.txt
+  чтобы в репозитории не было локальных данных, логов и снапшотов.
+
+2. Виртуальное окружение и зависимости
+- Создано виртуальное окружение .venv в корне проекта.
+- В .venv установлены:
+  - fastapi[standard]
+  - uvicorn
+  - requests
+  - httpx
+- Все дальнейшие команды разработки и запуска сервиса выполняются через:
+  - source .venv/bin/activate
+
+3. Системная конфигурация
+- Создан файл config/system.yaml с базовыми настройками:
+  - environment: dev
+  - paths:
+      data_root: ./data
+      chromadb_dir: ./data/chromadb
+      sqlite_path: ./data/sqlite/tables.db
+      logs_path: ./data/logs/app.log
+  - llm:
+      mode: dev
+      connector: "llm_connectors.connector_dev:call_llm"
+- Это заготовка для будущего конфиг-лоадера и переключения режимов (dev/test/prod) строго через конфиг, как описано в ТЗ.
+
+4. Интеграция с локальной LLM через ollama_chat_4b
+- Принято решение отказаться от внешних API (DeepSeek/OpenRouter) в dev из-за отсутствия стабильного бесплатного лимита и завязки на биллинг.
+- В качестве dev-LLM используется локальный стек:
+  - движок Ollama с моделями llama3.2:1b и llama3.2:3b
+  - отдельный сервис ollama_chat_4b (FastAPI + uvicorn) с HTTP API:
+    - POST http://127.0.0.1:4004/api/chat
+    - тело: {"messages": [...], "model": "llama3.2:1b"|"llama3.2:3b" (опционально)}
+    - ответ: {"reply": "...", "raw": {... полный ответ Ollama ...}}
+- В rag_advct создан коннектор llm_connectors/connector_dev.py:
+  - использует httpx.AsyncClient с таймаутом 120 секунд
+  - читает OLLAMA_CHAT_URL из окружения (по умолчанию http://127.0.0.1:4004/api/chat)
+  - функция async call_llm(messages, model=None):
+    - отправляет messages в формате OpenAI (role/content) на локальный сервис
+    - при model != None добавляет поле "model" в запрос (например "llama3.2:1b" или "llama3.2:3b")
+    - ожидает ответ {"reply": "...", "raw": {...}}
+    - возвращает dict в формате, совместимом с OpenAI:
+      {
+        "model": <имя модели или "default">,
+        "choices": [
+          {"message": {"role": "assistant", "content": reply}}
+        ],
+        "raw": <оригинальный ответ сервиса>
+      }
+    - в случае ошибки статуса выбрасывает LLMError с текстом вида "ollama_chat_4b error <code>: <body>"
+
+5. Основной FastAPI-сервис (app/main.py)
+- Реализовано приложение FastAPI, которое в будущем станет REST-сервисом RAG:
+  - title="RAG Service", version="0.1.0"
+- Добавлен эндпоинт GET /api/v1/health:
+  - возвращает JSON:
+    {
+      "status": "ok",
+      "environment": "dev",
+      "chromadb": "unknown",
+      "sqlite": "unknown",
+      "llm_mode": "ollama_chat_4b",
+      "uptime_seconds": 0
+    }
+  - пока используется как простой health-check без реального подключения к БД/ChromaDB.
+- Добавлен тестовый эндпоинт GET /api/v1/llm_test:
+  - вызывает async call_llm из llm_connectors/connector_dev.py
+  - передаёт одно пользовательское сообщение "Скажи одно слово: тест."
+  - принудительно задаёт model="llama3.2:1b"
+  - извлекает текст ответа из resp["choices"][0]["message"]["content"]
+  - возвращает JSON:
+    - {"ok": True, "answer": "<ответ локальной модели>"} при успехе
+    - {"ok": False, "error": "<текст ошибки>"} при исключении LLMError
+- Эндпоинт /api/v1/llm_test успешно проверен через curl:
+  - при запущенных ollama и ollama_chat_4b возврат:
+    {"ok": true, "answer": "Тест - ..."} (живой ответ локальной модели),
+    что подтверждает рабочую связку rag_advct → ollama_chat_4b → Ollama.
+
+6. .env и окружение
+- Текущий .env содержит настройки для локальной инфраструктуры:
+  - OLLAMA_CHAT_URL=http://127.0.0.1:4004/api/chat
+- Переменные окружения для rag_advct сейчас минимальны, внешние сервисы LLM отключены.
+
+7. Итоги шага
+- Есть рабочий каркас сервиса rag_advct:
+  - FastAPI-приложение с health-эндпоинтом и тестом интеграции LLM.
+  - Коннектор к локальному LLM-сервису ollama_chat_4b.
+  - Виртуальное окружение и базовая конфигурация system.yaml для дальнейшей реализации TaskConfig, RAG-пайплайна и режимов prod/dev/test.
+- Следующий шаг (в отдельной ветке):
+  - реализовать config_loader и модель TaskConfig по ТЗ,
+  - добавить эндпоинт /api/v1/task/query, который будет использовать технический промпт задачи и локальную LLM через коннектор.
+
+## FILE: README.md
+# N3R7A2C7
+
+**Version:** 0.3
+
+## Описание
+
+Система выполнения заявок - профессиональный инструмент для управления и обработки заявок.
+
+## Возможности
+
+- Централизованное хранение заявок
+- Отслеживание статуса выполнения
+- Автоматизация рабочих процессов
+- Детальная документация проекта
+
+## Структура проекта
+
+```
+N3R7A2C7/
+├── README.md              # Основная документация
+├── CHANGELOG.md           # История изменений
+├── PROJECT_PLAN.md        # План разработки
+├── logs/                  # Логи системы
+├── docs/                  # Дополнительная документация
+└── src/                   # Исходный код
+```
+
+## Технологии
+
+- Система контроля версий: Git/GitHub
+- Документация: Markdown
+- Модульная архитектура
+
+## Статус
+
+🔧 В разработке - версия 0.3
+
+---
+*Проект находится в активной разработке. Детальный план см. в PROJECT_PLAN.md*
+
+## FILE: app/api/v1/__init__.py
+
+
+## FILE: app/api/v1/routes.py
+
+
+## FILE: app/core/__init__.py
+
+
+## FILE: app/core/config_loader.py
+
+
+## FILE: app/core/llm_client.py
+
+
+## FILE: app/main.py
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+from llm_connectors.connector_dev import call_llm, LLMError
+
+app = FastAPI(title="RAG Service", version="0.1.0")
+
+
+@app.get("/api/v1/health")
+async def health():
+    return JSONResponse(
+        {
+            "status": "ok",
+            "environment": "dev",
+            "chromadb": "unknown",
+            "sqlite": "unknown",
+            "llm_mode": "ollama_chat_4b",
+            "uptime_seconds": 0,
+        }
+    )
+
+
+@app.get("/api/v1/llm_test")
+async def llm_test():
+    try:
+        resp = await call_llm(
+            [{"role": "user", "content": "Скажи одно слово: тест."}],
+            model="llama3.2:1b",
+        )
+        content = resp["choices"][0]["message"]["content"]
+        return {"ok": True, "answer": content}
+    except LLMError as e:
+        return {"ok": False, "error": str(e)}
+
+## FILE: code_collector.py
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).parent.resolve()
+SNAPSHOT_FILE = PROJECT_ROOT / "all_code.txt"
+
+INCLUDE_EXTS = {".py", ".yaml", ".yml", ".txt", ".md"}
+EXCLUDE_FILES = {"all_code.txt", ".env"}
+
+
+def should_include(path: Path) -> bool:
+    # пропускаем файлы внутри скрытых директорий (начинающихся с ".")
+    for part in path.parts:
+        if part.startswith("."):
+            return False
+    if path.name in EXCLUDE_FILES:
+        return False
+    if path.suffix not in INCLUDE_EXTS:
+        return False
+    return True
+
+
+def collect_files():
+    files = []
+    seen = set()
+    for p in PROJECT_ROOT.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(PROJECT_ROOT)
+        if rel in seen:
+            continue
+        if should_include(p):
+            seen.add(rel)
+            files.append(p)
+    return sorted(files, key=lambda p: str(p))
+
+
+def build_snapshot():
+    files = collect_files()
+    lines = []
+    lines.append("# SNAPSHOT OF PROJECT FILES (TEXT)\n")
+    lines.append("# Each file is separated by a marker line: ## FILE: <relative_path>\n\n")
+
+    for path in files:
+        rel_path = path.relative_to(PROJECT_ROOT)
+        lines.append(f"## FILE: {rel_path}\n")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception as e:
+            lines.append(f"# ERROR READING FILE: {e}\n\n")
+            continue
+        lines.append(text)
+        if not text.endswith("\n"):
+            lines.append("\n")
+        lines.append("\n")
+
+    SNAPSHOT_FILE.write_text("".join(lines), encoding="utf-8")
+    print(f"[code_collector] Snapshot written to {SNAPSHOT_FILE} ({len(files)} files).")
+
+
+def main():
+    print("code_collector.py — снимок проекта в all_code.txt")
+    print("1) Обновить all_code.txt (все файлы кроме скрытых папок)")
+    choice = input("Выбор (1): ").strip() or "1"
+    if choice == "1":
+        build_snapshot()
+    else:
+        print("Неизвестный выбор, ничего не делаю.")
+
+
+if __name__ == "__main__":
+    main()
+
+## FILE: config/system.yaml
+environment: dev  # dev | test | prod
+
+paths:
+  data_root: "./data"
+  chromadb_dir: "./data/chromadb"
+  sqlite_path: "./data/sqlite/tables.db"
+  logs_path: "./data/logs/app.log"
+
+llm:
+  mode: dev        # dev -> OpenRouter, prod/test заполним позже
+  connector: "llm_connectors.connector_dev:call_llm"
+
+## FILE: docker/docker-compose.dev.yml
+
+
+## FILE: llm_connectors/connector_dev.py
+import os
+from typing import List, Dict, Any
+
+import httpx
+
+
+OLLAMA_CHAT_URL = os.getenv(
+    "OLLAMA_CHAT_URL",
+    "http://127.0.0.1:4004/api/chat",
+)
+
+
+class LLMError(Exception):
+    pass
+
+
+async def call_llm(
+    messages: List[Dict[str, Any]],
+    model: str | None = None,
+) -> Dict[str, Any]:
+    """
+    Дев-коннектор к локальному сервису ollama_chat_4b.
+    messages: список сообщений в формате OpenAI (role/content).
+    model: "llama3.2:1b" или "llama3.2:3b" (если None — дефолт в сервисе).
+    """
+    payload: Dict[str, Any] = {"messages": messages}
+    if model:
+        payload["model"] = model
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        r = await client.post(OLLAMA_CHAT_URL, json=payload)
+        if r.status_code != 200:
+            raise LLMError(f"ollama_chat_4b error {r.status_code}: {r.text}")
+        data = r.json()
+        # ожидаем {"reply": "...", "raw": {...}}
+        reply = data.get("reply", "")
+        return {
+            "model": model or "default",
+            "choices": [
+                {"message": {"role": "assistant", "content": reply}}
+            ],
+            "raw": data.get("raw"),
+        }
+
+## FILE: tests/test_api.py
+
+
