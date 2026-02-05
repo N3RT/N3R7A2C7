@@ -12,9 +12,10 @@ class AccessDecision:
 
 def check_task_access(task_cfg: TaskConfig) -> AccessDecision:
     """
-    Реализация правил из ТЗ:
-    - demo: можно в prod/dev/test;
-    - corporate: только в prod, в dev/test — блок.
+    Простейшая модель доступа:
+    - demo-задачи разрешены в любом окружении;
+    - corporate-задачи тоже разрешены в любом окружении (ограничение по dev снято).
+    В будущем сюда можно добавить проверку ролей пользователя и другие правила.
     """
     env = get_environment()
 
@@ -25,14 +26,9 @@ def check_task_access(task_cfg: TaskConfig) -> AccessDecision:
         )
 
     if task_cfg.task_type == "corporate":
-        if env == "prod":
-            return AccessDecision(
-                allowed=True,
-                reason="corporate task in prod is allowed",
-            )
         return AccessDecision(
-            allowed=False,
-            reason="corporate tasks are allowed only in prod",
+            allowed=True,
+            reason=f"corporate task in environment={env} is allowed",
         )
 
     return AccessDecision(

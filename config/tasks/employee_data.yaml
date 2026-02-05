@@ -1,0 +1,7 @@
+task_id: employee_data
+name: Employee data demo
+description: Демо corporate-задача для вопросов о данных сотрудников.
+task_type: corporate
+technical_prompt: >
+  Ты — помощник по внутренним данным сотрудников.
+  Отвечай кратко и строго по делу.

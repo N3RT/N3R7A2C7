@@ -7,5 +7,9 @@ paths:
   logs_path: "./data/logs/app.log"
 
 llm:
-  mode: dev        # dev -> OpenRouter, prod/test заполним позже
+  # mode:
+  #   dev  - локальная модель через connector_dev
+  #   test - можно использовать тот же коннектор или отдельный стенд
+  #   prod - боевой коннектор (добавишь позже в llm_connectors.connector_prod)
+  mode: dev
   connector: "llm_connectors.connector_dev:call_llm"
