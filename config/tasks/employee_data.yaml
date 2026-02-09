@@ -1,7 +1,19 @@
 task_id: employee_data
-name: Employee data demo
-description: Демо corporate-задача для вопросов о данных сотрудников.
-task_type: corporate
-technical_prompt: >
-  Ты — помощник по внутренним данным сотрудников.
-  Отвечай кратко и строго по делу.
+name: "Данные о сотрудниках (demo)"
+description: "Поиск информации о сотрудниках компании по имени, должности или подразделению (демо-задача)"
+task_type: demo
+technical_prompt: |
+  Ты помогаешь пользователю найти информацию о сотрудниках.
+  Используй контекст из базы данных и отвечай кратко и по делу.
+
+sources_mode: tables
+enable_text_search: false
+enable_table_search: true
+
+table_search:
+  mode: topk
+  topk: 5
+  similarity_threshold: 0.3
+
+enable_research: false
+postprocessing_type: docx-file

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from app.core.task_config import TaskConfig
 from app.core.chroma_client import get_chroma_client
@@ -12,126 +12,124 @@ class RetrievedChunk:
     score: float
 
 
-def ensure_collection_for_task(task_cfg: TaskConfig):
-    """
-    Создаёт (при первом обращении) и заполняет демо-коллекции для задач.
-    Для реальных задач вместо этого будет отдельный ingestion.
-    """
-    client = get_chroma_client()
-
-    # Демонстрационная коллекция для приветственной задачи
+def _get_collection_name_for_task(task_cfg: TaskConfig) -> Optional[str]:
     if task_cfg.task_id == "demo_hello":
-        coll = client.get_or_create_collection(name="demo_hello_texts")
-        if coll.count() > 0:
-            return coll
-
-        demodoc = (
-            "Этот демо-сервис показывает, как работает RAG-система для внутренних задач компании. "
-            "Он умеет отвечать на общие вопросы о сервисе заявок, доступах к ИТ-системам и базовых регламентах. "
-            "В реальной эксплуатации сюда будут загружены настоящие корпоративные документы, инструкции и регламенты."
-        )
-        coll.add(
-            ids=["demo_hello_doc1"],
-            documents=[demodoc],
-            metadatas=[{"source_id": "demo_hello_doc1", "kind": "demo"}],
-        )
-        return coll
-
-    # Демонстрационная коллекция для регламентов и правил
+        return "demo_hello_texts"
     if task_cfg.task_id == "demo_rules":
-        coll = client.get_or_create_collection(name="demo_rules_texts")
-        if coll.count() > 0:
-            return coll
-
-        texts = [
-            (
-                "Регламент подачи заявок. "
-                "Все запросы на доступ к ИТ-системам оформляются через портал заявок. "
-                "Сотрудник указывает систему, тип доступа и обоснование. "
-                "Заявка автоматически уходит на согласование руководителю и, при необходимости, в службу информационной безопасности."
-            ),
-            (
-                "Регламент согласования доступов. "
-                "Руководитель отвечает за подтверждение бизнес-необходимости доступа. "
-                "Служба ИБ проверяет соответствие запроса политике безопасности. "
-                "Без согласования руководителя и ИБ доступ предоставляться не может."
-            ),
-            (
-                "Регламент работы с инцидентами. "
-                "Инциденты по ИТ-системам фиксируются в системе заявок с категорией 'Инцидент'. "
-                "Для критичных инцидентов действует сокращённое время реакции и уведомление дежурной смены по заранее настроенным каналам."
-            ),
-            (
-                "Общие правила безопасности. "
-                "Запрещена передача корпоративных паролей третьим лицам. "
-                "Работа с конфиденциальными данными допускается только на корпоративных устройствах. "
-                "Подозрительная активность должна быть немедленно сообщена в службу ИБ."
-            ),
-        ]
-        ids = [f"demo_rules_doc{i}" for i in range(1, len(texts) + 1)]
-        metadatas = [
-            {"source_id": ids[i], "kind": "demo_rules"} for i in range(len(texts))
-        ]
-
-        coll.add(
-            ids=ids,
-            documents=texts,
-            metadatas=metadatas,
-        )
-        return coll
-
+        return "demo_rules_texts"
     return None
 
 
+def ensure_collection_for_task(task_cfg: TaskConfig):
+    client = get_chroma_client()
+    coll_name = _get_collection_name_for_task(task_cfg)
+    if coll_name is None:
+        return None
+
+    coll = client.get_or_create_collection(name=coll_name)
+
+    if coll.count() == 0:
+        if task_cfg.task_id == "demo_hello":
+            texts = [
+                (
+                    "demo_hello_doc_1",
+                    "Это демо-документ системы заявок. Система помогает сотрудникам задавать вопросы "
+                    "по регламентам и процессам, а также получать подсказки по доступам и ИТ-сервисам. "
+                    "В будущем сюда будут загружены настоящие корпоративные документы и инструкции.",
+                )
+            ]
+        elif task_cfg.task_id == "demo_rules":
+            texts = [
+                (
+                    "demo_rules_doc_1",
+                    "В компании действуют базовые регламенты: сотрудник обязан согласовывать доступы "
+                    "к системам через заявки, соблюдать правила информационной безопасности и "
+                    "использовать только утверждённые каналы коммуникации.",
+                )
+            ]
+        else:
+            texts = []
+
+        if texts:
+            ids = []
+            docs = []
+            metadatas = []
+            for source_id, text in texts:
+                ids.append(source_id)
+                docs.append(text)
+                metadatas.append({"source_id": source_id, "kind": task_cfg.task_id})
+            coll.add(ids=ids, documents=docs, metadatas=metadatas)
+
+    return coll
+
+
 def retrieve_text_chunks(task_cfg: TaskConfig, query: str, top_k: int = 3) -> List[RetrievedChunk]:
-    """
-    Простейший retrieval по текстам ChromaDB для демо-задач.
-    """
     coll = ensure_collection_for_task(task_cfg)
-    res: List[RetrievedChunk] = []
-
+    results: List[RetrievedChunk] = []
     if coll is None:
-        return res
+        return results
 
-    search = coll.query(query_texts=[query], n_results=top_k)
+    ts = task_cfg.text_search
+    mode = "topk"
+    max_chunks = top_k
+    threshold = None
+
+    if ts is not None:
+        mode = ts.mode or "topk"
+        max_chunks = ts.max_chunks or top_k
+        threshold = ts.similarity_threshold
+
+    search = coll.query(
+        query_texts=[query],
+        n_results=max_chunks,
+    )
     docs = search.get("documents", [[]])[0]
     ids = search.get("ids", [[]])[0]
     dists = search.get("distances", [[]])[0]
 
-    chunks: List[RetrievedChunk] = []
-    for doc, id_, dist in zip(docs, ids, dists):
-        chunks.append(
-            RetrievedChunk(
-                text=doc,
-                source_id=id_,
-                score=float(dist),
-            )
+    raw_chunks: List[RetrievedChunk] = []
+    for doc, sid, dist in zip(docs, ids, dists):
+        raw_chunks.append(
+            RetrievedChunk(text=doc, source_id=sid, score=float(dist))
         )
-    return chunks
+
+    if mode == "allwiththreshold" and threshold is not None:
+        filtered = [ch for ch in raw_chunks if ch.score >= threshold]
+        return filtered
+
+    return raw_chunks[:top_k]
+
+
+def retrieve_text_chunks_for_research(task_cfg: TaskConfig, query: str) -> List[RetrievedChunk]:
+    """
+    Упрощённый расширенный поиск для research:
+    увеличиваем n_results в 2 раза относительно базового top_k.
+    """
+    base_top_k = 3
+    ts = task_cfg.text_search
+    if ts is not None and ts.topk:
+        base_top_k = ts.topk
+
+    extended_top_k = max(base_top_k * 2, base_top_k + 1)
+    return retrieve_text_chunks(task_cfg, query, top_k=extended_top_k)
 
 
 def build_llm_prompt(task_cfg: TaskConfig, query: str, chunks: List[RetrievedChunk]) -> str:
-    """
-    Формирует системный промпт для LLM на основе TaskConfig и найденных фрагментов.
-    """
-    base_prompt = (
-        task_cfg.technical_prompt
-        or "Ты помощник по внутренним регламентам и сервисам компании. Отвечай кратко и по делу."
-    )
+    base_prompt = task_cfg.technical_prompt or ""
+    context_lines: List[str] = []
 
-    context_lines = []
     for i, ch in enumerate(chunks, start=1):
-        context_lines.append(f"{i}. [source={ch.source_id}, score={ch.score:.4f}] {ch.text}")
+        context_lines.append(
+            f"{i}. [source={ch.source_id}, score={ch.score:.4f}] {ch.text}"
+        )
 
-    context_block = "\n".join(context_lines) if context_lines else "Контекстов по запросу не найдено."
+    context_block = "\n".join(context_lines) if context_lines else ""
 
     full_prompt = (
         f"{base_prompt}\n\n"
-        f"Ниже приведён контекст, найденный по запросу пользователя:\n"
-        f"{context_block}\n\n"
-        f"Запрос пользователя:\n"
-        f"{query}\n\n"
-        f"Дай понятный и аккуратный ответ на русском языке. "
-        f"Если контекста не хватает, явно скажи об этом и ответь в общих чертах."
+        f"Контекст из базы знаний:\n{context_block}\n\n"
+        f"Вопрос пользователя:\n{query}\n\n"
+        f"Отвечай, опираясь только на контекст. "
+        f"Если ответ неочевиден, явно скажи, что информации недостаточно."
     )
     return full_prompt

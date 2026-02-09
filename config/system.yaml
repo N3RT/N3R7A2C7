@@ -1,15 +1,20 @@
-environment: dev  # dev | test | prod
+environment: test
 
 paths:
-  data_root: "./data"
-  chromadb_dir: "./data/chromadb"
-  sqlite_path: "./data/sqlite/tables.db"
-  logs_path: "./data/logs/app.log"
+  data_root: .data
+  chroma_db_dir: .data/chroma_db
+  sqlite_path: .data/sqlite/tables.db
+  logs_path: .data/logs/app.log
+  output_dir: .data/outputs
 
 llm:
-  # mode:
-  #   dev  - локальная модель через connector_dev
-  #   test - можно использовать тот же коннектор или отдельный стенд
-  #   prod - боевой коннектор (добавишь позже в llm_connectors.connector_prod)
-  mode: dev
-  connector: "llm_connectors.connector_dev:call_llm"
+  mode: prod
+  connector: llm_connectors.connector_prod.call_llm
+
+  # ===== НАСТРОЙКИ КОРПОРАТИВНОЙ LLM (OpenAI-совместимый формат) =====
+  base_url: "https://YOUR-CORPORATE-LLM-URL/v1"
+  api_key: "YOUR_CORPORATE_LLM_TOKEN_HERE"
+  model: "YOUR_CORPORATE_MODEL_NAME"
+
+access_control:
+  allow_corporate_in_dev: false
